@@ -34,6 +34,8 @@ const ACTION_MAP: Record<string, ActionType> = {
   start_workflow: null,
   get_workflow_status: null,
   cleanup_non_followers: null,
+  get_queue: null,
+  complete_queue_item: null,
 };
 
 const DEDUP_MAP: Record<string, DedupType> = {

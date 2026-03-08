@@ -19,6 +19,20 @@ export interface Workflow {
   outcome: string | null;          // null = active, "followed_back", "cleaned_up", etc.
 }
 
+export interface QueueItem {
+  id: string;                     // "q:<tweet_id>" for replies, "q:post-<timestamp>" for mention posts
+  type: "cold_reply" | "mention_post";
+  status: "pending" | "posted" | "skipped";
+  created_at: string;             // ISO 8601
+  target_tweet_id?: string;       // tweet being replied to (cold_reply only)
+  target_author?: string;         // @username of tweet author
+  target_text_snippet?: string;   // first ~100 chars for context
+  text: string;                   // the reply/post text
+  intent_url: string;             // pre-generated X intent URL
+  source_tool: string;            // "reply_to_tweet" or "post_tweet"
+  source_workflow_id?: string;    // if queued from a workflow
+}
+
 export interface StateFile {
   budget: {
     date: string; // ISO 8601 date: "2026-02-23"
@@ -40,6 +54,7 @@ export interface StateFile {
   };
   mentioned_by: string[]; // user_ids of authors who have @mentioned us (for reply eligibility)
   workflows: Workflow[];
+  queue: QueueItem[];
 }
 
 // Entries older than 90 days are pruned on load
@@ -47,6 +62,12 @@ const DEDUP_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 
 // Completed workflows older than 30 days are pruned on load
 const WORKFLOW_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+// Pending queue items older than 7 days are pruned on load
+const QUEUE_PENDING_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Completed/skipped queue items older than 1 day are pruned on load
+const QUEUE_DONE_MAX_AGE_MS = 1 * 24 * 60 * 60 * 1000;
 
 // Max active workflows (env-configurable)
 export function getMaxWorkflows(): number {
@@ -82,6 +103,7 @@ export function getDefaultState(): StateFile {
     },
     mentioned_by: [],
     workflows: [],
+    queue: [],
   };
 }
 
@@ -142,6 +164,34 @@ function pruneWorkflows(workflows: Workflow[]): Workflow[] {
   });
 }
 
+function isQueueItem(obj: unknown): obj is QueueItem {
+  if (!obj || typeof obj !== "object") return false;
+  const q = obj as Record<string, unknown>;
+  return (
+    typeof q.id === "string" &&
+    typeof q.type === "string" &&
+    typeof q.status === "string" &&
+    typeof q.created_at === "string" &&
+    typeof q.text === "string" &&
+    typeof q.intent_url === "string" &&
+    typeof q.source_tool === "string"
+  );
+}
+
+function asQueueArray(value: unknown): QueueItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isQueueItem);
+}
+
+function pruneQueue(items: QueueItem[]): QueueItem[] {
+  const now = Date.now();
+  return items.filter((q) => {
+    const age = now - new Date(q.created_at).getTime();
+    if (q.status === "pending") return age < QUEUE_PENDING_MAX_AGE_MS;
+    return age < QUEUE_DONE_MAX_AGE_MS;
+  });
+}
+
 /**
  * Validate and normalize a parsed JSON object into a safe StateFile.
  * Missing or invalid fields fall back to defaults.
@@ -192,6 +242,7 @@ function validateState(raw: unknown): StateFile {
     },
     mentioned_by: mentionedBy,
     workflows,
+    queue: pruneQueue(asQueueArray(obj.queue)),
   };
 }
 

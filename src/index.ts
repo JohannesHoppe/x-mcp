@@ -7,9 +7,9 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { z } from "zod";
 import { XApiClient } from "./x-api.js";
-import { parseTweetId, errorMessage, formatResult, isColdReplyBlocked } from "./helpers.js";
+import { parseTweetId, errorMessage, formatResult, isColdReplyBlocked, buildIntentUrl } from "./helpers.js";
 import { encode } from "./toon.js";
-import { loadState, saveState, type StateFile } from "./state.js";
+import { loadState, saveState, type StateFile, type QueueItem } from "./state.js";
 import {
   loadBudgetConfig,
   formatBudgetString,
@@ -118,6 +118,8 @@ const VALID_KEYS: Record<string, string[]> = {
   start_workflow: ["type", "target", "reply_tweet_id"],
   get_workflow_status: ["type", "include_completed"],
   cleanup_non_followers: ["max_unfollow", "max_pages"],
+  get_queue: ["status"],
+  complete_queue_item: ["queue_id", "action"],
 };
 
 // --- Handler wrapper ---
@@ -136,7 +138,7 @@ type ToolResult = {
 
 function wrapHandler(
   toolName: string,
-  handler: (args: Record<string, unknown>, resolvedTargetId: string | undefined, state: StateFile) => Promise<{ result: unknown; rateLimit: string; quoteFallback?: boolean }>,
+  handler: (args: Record<string, unknown>, resolvedTargetId: string | undefined, state: StateFile) => Promise<{ result: unknown; rateLimit: string }>,
   opts?: WrapOptions,
 ): (args: Record<string, unknown>) => Promise<ToolResult> {
   return async (args) => {
@@ -187,22 +189,11 @@ function wrapHandler(
       }
 
       // Execute the actual API call, passing resolved ID and state
-      const { result, rateLimit, quoteFallback } = await handler(args, targetId, state);
+      const { result, rateLimit } = await handler(args, targetId, state);
 
       // Record action for write tools
       if (isWriteTool(toolName)) {
         recordAction(toolName, targetId ?? null, state);
-      }
-
-      // Quote fallback: also record in quoted dedup set + inject _fallback
-      if (quoteFallback && targetId) {
-        const now = new Date().toISOString();
-        if (!state.engaged.quoted.some((e) => e.tweet_id === targetId)) {
-          state.engaged.quoted.push({ tweet_id: targetId, at: now });
-        }
-        if (result && typeof result === "object") {
-          (result as Record<string, unknown>)._fallback = "quote_tweet";
-        }
       }
 
       // Post-process hook (e.g. get_mentions populating mentioned_by)
@@ -211,7 +202,7 @@ function wrapHandler(
       }
 
       // Save state if anything mutated it
-      if (isWriteTool(toolName) || quoteFallback || opts?.postProcess) {
+      if (isWriteTool(toolName) || opts?.postProcess) {
         saveState(statePath, state);
       }
 
@@ -254,9 +245,25 @@ server.registerTool(
       media_ids: z.array(z.string()).optional().describe("Media IDs to attach (from upload_media)"),
     }).passthrough(),
   },
-  wrapHandler("post_tweet", async (args) => {
+  wrapHandler("post_tweet", async (args, _resolvedId, state) => {
+    const text = args.text as string;
+
+    // Detect @mentions — X blocks these in standalone posts
+    const mentionMatches = text.match(/@\w{1,15}/g);
+    if (mentionMatches && mentionMatches.length > 0) {
+      const intentUrl = buildIntentUrl({ text });
+      const itemId = `q:post-${Date.now()}`;
+      const item: QueueItem = {
+        id: itemId, type: "mention_post", status: "pending",
+        created_at: new Date().toISOString(),
+        text, intent_url: intentUrl, source_tool: "post_tweet",
+      };
+      state.queue.push(item);
+      return { result: { queued: true, queue_id: itemId, intent_url: intentUrl, message: `Post with mentions queued for manual posting. Mentions: ${mentionMatches.join(", ")}` }, rateLimit: "" };
+    }
+
     return client.postTweet({
-      text: args.text as string,
+      text,
       poll_options: args.poll_options as string[] | undefined,
       poll_duration_minutes: args.poll_duration_minutes as number | undefined,
       media_ids: args.media_ids as string[] | undefined,
@@ -281,31 +288,59 @@ server.registerTool(
 
     // Resolve target tweet author to check mentioned_by cache
     let authorId: string | undefined;
+    let authorUsername: string | undefined;
+    let targetTextSnippet: string | undefined;
     try {
       const { result: tweetData } = await client.getTweet(tweetId);
-      authorId = (tweetData as { data?: { author_id?: string } })?.data?.author_id;
+      const data = tweetData as { data?: { author_id?: string; text?: string }; includes?: { users?: Array<{ id: string; username: string }> } };
+      authorId = data?.data?.author_id;
+      targetTextSnippet = data?.data?.text?.slice(0, 100);
+      if (authorId && data?.includes?.users) {
+        const user = data.includes.users.find((u) => u.id === authorId);
+        if (user) authorUsername = `@${user.username}`;
+      }
     } catch {
-      // getTweet failure — fall through to quote path
+      // getTweet failure — fall through to queue path
     }
 
     const canReply = authorId ? state.mentioned_by.includes(authorId) : false;
 
     if (canReply) {
-      // Author has mentioned us — try direct reply, fallback to quote on 403
+      // Author has mentioned us — try direct reply
       try {
         return await client.postTweet({ text, reply_to: tweetId, media_ids: mediaIds });
       } catch (err) {
         if (isColdReplyBlocked(err)) {
-          // Stale cache — fallback to quote
-          const quoteResult = await client.postTweet({ text, quote_tweet_id: tweetId, media_ids: mediaIds });
-          return { ...quoteResult, quoteFallback: true };
+          // Stale cache — queue for manual posting
+          const intentUrl = buildIntentUrl({ text, in_reply_to: tweetId });
+          const item: QueueItem = {
+            id: `q:${tweetId}`, type: "cold_reply", status: "pending",
+            created_at: new Date().toISOString(),
+            target_tweet_id: tweetId, target_author: authorUsername,
+            target_text_snippet: targetTextSnippet,
+            text, intent_url: intentUrl, source_tool: "reply_to_tweet",
+          };
+          if (!state.queue.some((q) => q.id === item.id && q.status === "pending")) {
+            state.queue.push(item);
+          }
+          return { result: { queued: true, queue_id: item.id, intent_url: intentUrl, message: "Cold reply queued for manual posting." }, rateLimit: "" };
         }
         throw err;
       }
     } else {
-      // Author hasn't mentioned us — go straight to quote tweet
-      const quoteResult = await client.postTweet({ text, quote_tweet_id: tweetId, media_ids: mediaIds });
-      return { ...quoteResult, quoteFallback: true };
+      // Author hasn't mentioned us — queue for manual posting
+      const intentUrl = buildIntentUrl({ text, in_reply_to: tweetId });
+      const item: QueueItem = {
+        id: `q:${tweetId}`, type: "cold_reply", status: "pending",
+        created_at: new Date().toISOString(),
+        target_tweet_id: tweetId, target_author: authorUsername,
+        target_text_snippet: targetTextSnippet,
+        text, intent_url: intentUrl, source_tool: "reply_to_tweet",
+      };
+      if (!state.queue.some((q) => q.id === item.id && q.status === "pending")) {
+        state.queue.push(item);
+      }
+      return { result: { queued: true, queue_id: item.id, intent_url: intentUrl, message: "Cold reply queued for manual posting." }, rateLimit: "" };
     }
   }, { getTargetTweetId: (args) => parseTweetId(args.tweet_id as string) }),
 );
@@ -993,6 +1028,79 @@ server.registerTool(
 
       return {
         content: [{ type: "text" as const, text: formatWorkflowOutput(output) }],
+      };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${errorMessage(e)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ============================================================
+// QUEUE TOOLS (human-in-the-loop)
+// ============================================================
+
+server.registerTool(
+  "get_queue",
+  {
+    description: "Get pending human-in-the-loop queue items. Returns items that need manual posting via X web/app, with pre-generated intent URLs.",
+    inputSchema: z.object({
+      status: z.enum(["pending", "posted", "skipped", "all"]).optional().describe("Filter by status (default: 'pending')"),
+    }).passthrough(),
+  },
+  async (args) => {
+    try {
+      const state = loadState(statePath);
+      const filterStatus = (args.status as string) ?? "pending";
+      const items = filterStatus === "all"
+        ? state.queue
+        : state.queue.filter((q) => q.status === filterStatus);
+
+      const budgetString = formatBudgetString(state, budgetConfig);
+      return {
+        content: [{ type: "text" as const, text: formatWorkflowOutput({ queue: items, count: items.length, x_budget: budgetString }) }],
+      };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${errorMessage(e)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  "complete_queue_item",
+  {
+    description: "Mark a queued item as posted or skipped by the human. Removes it from the active queue after pruning.",
+    inputSchema: z.object({
+      queue_id: z.string().describe("The queue item ID to complete"),
+      action: z.enum(["posted", "skipped"]).describe("What happened: 'posted' (human posted it) or 'skipped' (human decided not to)"),
+    }).passthrough(),
+  },
+  async (args) => {
+    try {
+      const state = loadState(statePath);
+      const queueId = args.queue_id as string;
+      const action = args.action as "posted" | "skipped";
+
+      const item = state.queue.find((q) => q.id === queueId);
+      if (!item) {
+        const budgetString = formatBudgetString(state, budgetConfig);
+        return {
+          content: [{ type: "text" as const, text: `Error: Queue item '${queueId}' not found.\n\nCurrent x_budget: ${budgetString}` }],
+          isError: true,
+        };
+      }
+
+      item.status = action;
+      saveState(statePath, state);
+
+      const budgetString = formatBudgetString(state, budgetConfig);
+      return {
+        content: [{ type: "text" as const, text: formatWorkflowOutput({ result: `Queue item ${queueId} marked as ${action}.`, x_budget: budgetString }) }],
       };
     } catch (e: unknown) {
       return {

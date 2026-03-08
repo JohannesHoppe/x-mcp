@@ -22,6 +22,20 @@ export function isColdReplyBlocked(error: unknown): boolean {
 }
 
 /**
+ * Build an X intent URL for one-click manual posting.
+ * Reply: https://x.com/intent/post?in_reply_to=TWEET_ID&text=...
+ * Standalone: https://x.com/intent/post?text=...
+ */
+export function buildIntentUrl(params: { text: string; in_reply_to?: string }): string {
+  const url = new URL("https://x.com/intent/post");
+  url.searchParams.set("text", params.text);
+  if (params.in_reply_to) {
+    url.searchParams.set("in_reply_to", params.in_reply_to);
+  }
+  return url.toString();
+}
+
+/**
  * Safely extract a message string from an unknown error value.
  */
 export function errorMessage(e: unknown): string {

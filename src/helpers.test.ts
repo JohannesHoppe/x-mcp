@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseTweetId, errorMessage, formatResult, isColdReplyBlocked } from "./helpers.js";
+import { parseTweetId, errorMessage, formatResult, isColdReplyBlocked, buildIntentUrl } from "./helpers.js";
 
 describe("parseTweetId", () => {
   it("parses raw numeric ID", () => {
@@ -192,5 +192,30 @@ describe("isColdReplyBlocked", () => {
   it("rejects unrelated errors", () => {
     const err = new Error("postTweet failed (HTTP 429): Rate limited.");
     expect(isColdReplyBlocked(err)).toBe(false);
+  });
+});
+
+describe("buildIntentUrl", () => {
+  it("generates standalone post URL", () => {
+    const url = buildIntentUrl({ text: "Hello world" });
+    expect(url).toBe("https://x.com/intent/post?text=Hello+world");
+  });
+
+  it("generates reply URL with in_reply_to", () => {
+    const url = buildIntentUrl({ text: "Great take!", in_reply_to: "123456789" });
+    expect(url).toContain("text=Great+take%21");
+    expect(url).toContain("in_reply_to=123456789");
+    expect(url.startsWith("https://x.com/intent/post?")).toBe(true);
+  });
+
+  it("URL-encodes special characters", () => {
+    const url = buildIntentUrl({ text: "Hello @user & friends 🚀\nnew line" });
+    expect(url).toContain("text=");
+    // Should not contain raw special chars
+    expect(url).not.toContain(" ");
+    expect(url).not.toContain("\n");
+    // Decode to verify roundtrip
+    const parsed = new URL(url);
+    expect(parsed.searchParams.get("text")).toBe("Hello @user & friends 🚀\nnew line");
   });
 });

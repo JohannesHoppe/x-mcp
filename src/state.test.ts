@@ -194,6 +194,7 @@ describe("saveState", () => {
       },
       mentioned_by: [],
       workflows: [],
+      queue: [],
     };
 
     saveState(filePath, state);
@@ -614,5 +615,110 @@ describe("mentioned_by", () => {
 
     const loaded = loadState(filePath);
     expect(loaded.mentioned_by).toEqual([]);
+  });
+});
+
+describe("queue", () => {
+  let filePath: string;
+
+  beforeEach(() => {
+    filePath = path.join(os.tmpdir(), `x-mcp-test-queue-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+  });
+
+  afterEach(() => {
+    try { fs.unlinkSync(filePath); } catch {}
+  });
+
+  it("default state has empty queue", () => {
+    expect(getDefaultState().queue).toEqual([]);
+  });
+
+  it("round-trips queue items through save/load", () => {
+    const state = getDefaultState();
+    const item = {
+      id: "q:123", type: "cold_reply" as const, status: "pending" as const,
+      created_at: new Date().toISOString(),
+      target_tweet_id: "123", target_author: "@someone",
+      target_text_snippet: "Hello world",
+      text: "Great take!", intent_url: "https://x.com/intent/post?text=Great+take%21&in_reply_to=123",
+      source_tool: "reply_to_tweet",
+    };
+    state.queue.push(item);
+    saveState(filePath, state);
+    const loaded = loadState(filePath);
+    expect(loaded.queue).toHaveLength(1);
+    expect(loaded.queue[0]).toEqual(item);
+  });
+
+  it("prunes pending items older than 7 days", () => {
+    const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
+    const fresh = new Date().toISOString();
+    const state = getDefaultState();
+    state.queue = [
+      { id: "q:old", type: "cold_reply", status: "pending", created_at: old, text: "old", intent_url: "u", source_tool: "reply_to_tweet" },
+      { id: "q:new", type: "cold_reply", status: "pending", created_at: fresh, text: "new", intent_url: "u", source_tool: "reply_to_tweet" },
+    ];
+    saveState(filePath, state);
+    const loaded = loadState(filePath);
+    expect(loaded.queue).toHaveLength(1);
+    expect(loaded.queue[0].id).toBe("q:new");
+  });
+
+  it("prunes completed items older than 1 day", () => {
+    const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    const state = getDefaultState();
+    state.queue = [
+      { id: "q:done", type: "cold_reply", status: "posted", created_at: old, text: "done", intent_url: "u", source_tool: "reply_to_tweet" },
+    ];
+    saveState(filePath, state);
+    const loaded = loadState(filePath);
+    expect(loaded.queue).toHaveLength(0);
+  });
+
+  it("keeps fresh completed items", () => {
+    const fresh = new Date().toISOString();
+    const state = getDefaultState();
+    state.queue = [
+      { id: "q:done", type: "cold_reply", status: "posted", created_at: fresh, text: "done", intent_url: "u", source_tool: "reply_to_tweet" },
+    ];
+    saveState(filePath, state);
+    const loaded = loadState(filePath);
+    expect(loaded.queue).toHaveLength(1);
+  });
+
+  it("filters invalid queue entries", () => {
+    fs.writeFileSync(filePath, JSON.stringify({
+      ...getDefaultState(),
+      queue: [
+        { id: "q:valid", type: "cold_reply", status: "pending", created_at: new Date().toISOString(), text: "hi", intent_url: "u", source_tool: "reply_to_tweet" },
+        { id: "q:invalid" },  // missing required fields
+        "not-an-object",
+        null,
+      ],
+    }));
+    const loaded = loadState(filePath);
+    expect(loaded.queue).toHaveLength(1);
+    expect(loaded.queue[0].id).toBe("q:valid");
+  });
+
+  it("handles missing queue field", () => {
+    fs.writeFileSync(filePath, JSON.stringify({
+      budget: { date: todayString(), replies: 0, originals: 0, likes: 0, retweets: 0, follows: 0, unfollows: 0, deletes: 0 },
+      last_write_at: null,
+      engaged: { replied_to: [], liked: [], retweeted: [], quoted: [], followed: [] },
+      mentioned_by: [],
+      workflows: [],
+    }));
+    const loaded = loadState(filePath);
+    expect(loaded.queue).toEqual([]);
+  });
+
+  it("handles non-array queue field", () => {
+    fs.writeFileSync(filePath, JSON.stringify({
+      ...getDefaultState(),
+      queue: "not-an-array",
+    }));
+    const loaded = loadState(filePath);
+    expect(loaded.queue).toEqual([]);
   });
 });
