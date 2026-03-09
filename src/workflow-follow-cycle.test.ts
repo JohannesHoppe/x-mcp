@@ -147,9 +147,9 @@ describe("processWorkflows — follow_cycle", () => {
     expect(workflow.check_after).not.toBeNull();
     expect(workflow.actions_done).toContain("reply_queued");
 
-    // Budget NOT consumed for queued items (human may skip)
-    expect(state.budget.replies).toBe(0);
-    // But dedup IS recorded
+    // Budget consumed (bot thinks it replied)
+    expect(state.budget.replies).toBe(1);
+    // Dedup recorded
     expect(state.engaged.replied_to).toHaveLength(1);
     expect(state.engaged.replied_to[0].tweet_id).toBe("tweet1");
 
@@ -203,7 +203,7 @@ describe("processWorkflows — follow_cycle", () => {
     // getTweet failed → authorId undefined → canReply false → queued
     expect(client.postTweet).not.toHaveBeenCalled();
     expect(workflow.actions_done).toContain("reply_queued");
-    expect(state.budget.replies).toBe(0);
+    expect(state.budget.replies).toBe(1);
     expect(state.engaged.replied_to).toHaveLength(1);
     expect(state.queue.length).toBe(1);
     expect(state.queue[0].type).toBe("cold_reply");
@@ -224,7 +224,7 @@ describe("processWorkflows — follow_cycle", () => {
     // author_id missing → canReply false → queued
     expect(client.postTweet).not.toHaveBeenCalled();
     expect(workflow.actions_done).toContain("reply_queued");
-    expect(state.budget.replies).toBe(0);
+    expect(state.budget.replies).toBe(1);
     expect(state.engaged.replied_to).toHaveLength(1);
     expect(state.queue.length).toBe(1);
   });
@@ -246,8 +246,8 @@ describe("processWorkflows — follow_cycle", () => {
     expect(client.postTweet).toHaveBeenCalledTimes(1);
     expect(client.postTweet).toHaveBeenCalledWith({ text: "Great insight!", reply_to: "tweet1" });
     expect(workflow.actions_done).toContain("reply_queued");
-    // Budget NOT consumed for queued items
-    expect(state.budget.replies).toBe(0);
+    // Budget consumed (bot thinks it replied)
+    expect(state.budget.replies).toBe(1);
     expect(state.engaged.replied_to).toHaveLength(1);
     expect(state.queue.length).toBe(1);
     expect(state.queue[0].intent_url).toContain("in_reply_to=tweet1");

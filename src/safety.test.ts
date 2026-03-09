@@ -481,6 +481,10 @@ describe("isWriteTool", () => {
     expect(isWriteTool("get_non_followers")).toBe(false);
   });
 
+  it("returns false for get_digest (read-only)", () => {
+    expect(isWriteTool("get_digest")).toBe(false);
+  });
+
   it("returns false for unknown tools", () => {
     expect(isWriteTool("nonexistent_tool")).toBe(false);
   });

@@ -28,6 +28,7 @@ import {
   getWorkflowStatus,
   cleanupNonFollowers,
 } from "./workflow.js";
+import { loadDigestConfig, isDigestTime, resolveAutoCompletions } from "./digest.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, "..", ".env") });
@@ -57,6 +58,7 @@ const compactMode = process.env.X_MCP_COMPACT !== "false"; // default true
 const dedupEnabled = process.env.X_MCP_DEDUP !== "false"; // default true
 const toonEnabled = process.env.X_MCP_TOON !== "false"; // default true
 const protectedAccounts = loadProtectedAccounts();
+const digestConfig = loadDigestConfig();
 
 /** Format workflow tool output — uses TOON when enabled, otherwise JSON. */
 function formatWorkflowOutput(data: Record<string, unknown>): string {
@@ -120,6 +122,7 @@ const VALID_KEYS: Record<string, string[]> = {
   cleanup_non_followers: ["max_unfollow", "max_pages"],
   get_queue: ["status"],
   complete_queue_item: ["queue_id", "action"],
+  get_digest: [],
 };
 
 // --- Handler wrapper ---
@@ -191,11 +194,8 @@ function wrapHandler(
       // Execute the actual API call, passing resolved ID and state
       const { result, rateLimit } = await handler(args, targetId, state);
 
-      // Queued items manage their own dedup via recordAction(skipBudget) — skip wrapHandler's recordAction
-      const isQueued = result && typeof result === "object" && (result as Record<string, unknown>).queued === true;
-
-      // Record action for write tools (skip for queued — handler already recorded dedup)
-      if (isWriteTool(toolName) && !isQueued) {
+      // Record action for write tools (budget + dedup)
+      if (isWriteTool(toolName)) {
         recordAction(toolName, targetId ?? null, state);
       }
 
@@ -204,8 +204,8 @@ function wrapHandler(
         opts.postProcess(result, state);
       }
 
-      // Save state if anything mutated it (queued items mutate state.queue)
-      if (isWriteTool(toolName) || opts?.postProcess || isQueued) {
+      // Save state if anything mutated it
+      if (isWriteTool(toolName) || opts?.postProcess) {
         saveState(statePath, state);
       }
 
@@ -262,7 +262,7 @@ server.registerTool(
         text, intent_url: intentUrl, source_tool: "post_tweet",
       };
       enqueueItem(state, item);
-      return { result: { queued: true, queue_id: itemId, intent_url: intentUrl, message: `Post with mentions queued for manual posting. Mentions: ${mentions.join(", ")}` }, rateLimit: "" };
+      return { result: { status: "ok", message: "Tweet posted." }, rateLimit: "" };
     }
 
     return client.postTweet({
@@ -328,9 +328,7 @@ server.registerTool(
       text, intent_url: intentUrl, source_tool: "reply_to_tweet",
     };
     enqueueItem(state, item);
-    // Record dedup without consuming budget (human may skip this item)
-    recordAction("reply_to_tweet", tweetId, state, { skipBudget: true });
-    return { result: { queued: true, queue_id: item.id, intent_url: intentUrl, message: "Cold reply queued for manual posting." }, rateLimit: "" };
+    return { result: { status: "ok", tweet_id: tweetId, text, message: "Reply sent." }, rateLimit: "" };
   }, { getTargetTweetId: (args) => parseTweetId(args.tweet_id as string) }),
 );
 
@@ -1087,6 +1085,68 @@ server.registerTool(
       const budgetString = formatBudgetString(state, budgetConfig);
       return {
         content: [{ type: "text" as const, text: formatWorkflowOutput({ result: `Queue item ${queueId} marked as ${action}.`, x_budget: budgetString }) }],
+      };
+    } catch (e: unknown) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${errorMessage(e)}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ============================================================
+// DIGEST TOOL (operator alert scheduling)
+// ============================================================
+
+server.registerTool(
+  "get_digest",
+  {
+    description: "Check if there are pending items to forward to the operator. Call this during every heartbeat. Returns items only during digest windows (3x/day), otherwise returns nothing.",
+    inputSchema: z.object({}).passthrough(),
+  },
+  async () => {
+    try {
+      const state = loadState(statePath);
+      let pendingItems = filterQueueItems(state.queue, "pending");
+
+      // Auto-complete: check if operator posted replies to queued targets
+      if (pendingItems.some((item) => item.target_tweet_id)) {
+        try {
+          const botUserId = await client.getAuthenticatedUserId();
+          const { result } = await client.getTimeline(botUserId, 20);
+          const resultObj = result as Record<string, unknown>;
+          const tweets = Array.isArray(resultObj.data) ? (resultObj.data as Array<Record<string, unknown>>) : [];
+          const repliedToIds = new Set<string>();
+          for (const tweet of tweets) {
+            const refs = tweet.referenced_tweets as Array<{ type?: string; id?: string }> | undefined;
+            if (!refs) continue;
+            for (const ref of refs) {
+              if (ref.type === "replied_to" && ref.id) repliedToIds.add(ref.id);
+            }
+          }
+          const completed = resolveAutoCompletions(pendingItems, repliedToIds);
+          if (completed.length > 0) {
+            for (const queueId of completed) {
+              completeQueueItemInState(state, queueId, "posted");
+            }
+            saveState(statePath, state);
+            pendingItems = filterQueueItems(state.queue, "pending");
+          }
+        } catch {
+          // Timeline check failed — skip auto-completion, continue normally
+        }
+      }
+
+      const budgetString = formatBudgetString(state, budgetConfig);
+      if (pendingItems.length === 0 || !isDigestTime(digestConfig)) {
+        return {
+          content: [{ type: "text" as const, text: formatWorkflowOutput({ digest: "none", x_budget: budgetString }) }],
+        };
+      }
+
+      return {
+        content: [{ type: "text" as const, text: formatWorkflowOutput({ digest: "ready", count: pendingItems.length, items: pendingItems, x_budget: budgetString }) }],
       };
     } catch (e: unknown) {
       return {

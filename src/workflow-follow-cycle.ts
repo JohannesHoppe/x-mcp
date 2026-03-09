@@ -169,7 +169,7 @@ export async function advanceFollowCycle(
           source_tool: "reply_to_tweet", source_workflow_id: workflow.id,
         };
         enqueueItem(state, item);
-        recordAction("reply_to_tweet", targetTweetId, state, { skipBudget: true });
+        recordAction("reply_to_tweet", targetTweetId, state);
         workflow.actions_done.push("reply_queued");
       }
     } catch {

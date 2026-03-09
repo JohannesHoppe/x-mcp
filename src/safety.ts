@@ -36,6 +36,7 @@ const ACTION_MAP: Record<string, ActionType> = {
   cleanup_non_followers: null,
   get_queue: null,
   complete_queue_item: null,
+  get_digest: null,
 };
 
 const DEDUP_MAP: Record<string, DedupType> = {
