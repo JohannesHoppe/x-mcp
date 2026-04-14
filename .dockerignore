@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+*.tsbuildinfo
+x-mcp-state.json
+.git/
+.github/
+docs/
+CLAUDE.md
+LLMs.md
+README.md
+charts/
+vitest.config.ts
+vitest.integration.config.ts
+src/**/*.test.ts
+src/fixtures/

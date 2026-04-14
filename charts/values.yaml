@@ -1,0 +1,55 @@
+nameOverride: 'x-mcp'
+
+image:
+  repository: io2060/x-autonomous-mcp
+  # Tag defaults to Chart.Version if not specified
+  tag: ""
+
+replicas: 1
+
+resources:
+  requests:
+    cpu: '100m'
+    memory: '128Mi'
+  limits:
+    cpu: '250m'
+    memory: '256Mi'
+
+service:
+  type: ClusterIP
+  port: 8000
+
+env:
+  # Safety rails — override per deployment
+  - name: X_MCP_MAX_ORIGINALS
+    value: '10'
+  - name: X_MCP_MAX_REPLIES
+    value: '8'
+  - name: X_MCP_MAX_LIKES
+    value: '20'
+  - name: X_MCP_MAX_RETWEETS
+    value: '5'
+  - name: X_MCP_MAX_FOLLOWS
+    value: '10'
+  - name: X_MCP_MAX_UNFOLLOWS
+    value: '10'
+  - name: X_MCP_MAX_DELETES
+    value: '5'
+  # JSON output for programmatic use (disable TOON)
+  - name: X_MCP_TOON
+    value: 'false'
+  - name: X_MCP_COMPACT
+    value: 'true'
+  - name: X_MCP_DEDUP
+    value: 'true'
+
+# X API credentials — stored in a Kubernetes Secret.
+# Set these per-deployment (e.g. via --set or values override).
+# The chart creates and manages this Secret.
+# secret:
+#   X_API_KEY: 'your-api-key'
+#   X_API_SECRET: 'your-api-secret'
+#   X_ACCESS_TOKEN: 'your-access-token'
+#   X_ACCESS_TOKEN_SECRET: 'your-access-token-secret'
+#   X_BEARER_TOKEN: 'your-bearer-token'
+secret: {}
