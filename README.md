@@ -1,17 +1,5 @@
 # x-autonomous-mcp
 
-> **Don't use the X API. Don't pay for it. It's dead.**
->
-> On February 23, 2026, X rolled out "[Operation Kill the Bots](https://devcommunity.x.com/t/update-to-reply-behavior-in-x-api-v2-restricting-programmatic-replies/257909)" — a platform-wide restriction that blocks **all** programmatic replies to anyone who hasn't @mentioned you first. Their announcement said "non-replies will remain unchanged." That was a lie. Cold **quote tweets** are also blocked with the same 403 error. So are **[@mentions in regular posts](https://devcommunity.x.com/t/mentions-blocked-in-regular-posts-not-replies-contradicts-announcement/258399)**. The API documentation still lists these features as available. They are not.
->
-> What are you paying for? You can search tweets, read them, and like them. That's it. You cannot reply to anyone. You cannot quote-tweet anyone. You cannot @mention anyone in a standalone post. Every "engagement" endpoint returns 403 unless the target already knows you exist. Enterprise is exempt from all restrictions — because of course it is.
->
-> We built this entire MCP server with budget limits, engagement dedup, workflow orchestration, compact responses, and a smart reply-to-quote fallback system. All of it works perfectly. None of it matters, because X decided that the API should be a read-only feed reader that charges you per read.
->
-> If you're evaluating the X API for any bot, agent, or automation that involves **talking to other people**: save your money. The API is not a developer platform. It's a honeypot that takes your payment and then blocks the features you paid for, with no refund and no advance notice.
->
-> — Updated 2026-03-01, after discovering the hard way that even our quote-tweet workaround gets 403'd.
-
 An MCP (Model Context Protocol) server that gives AI agents full access to the X (Twitter) API — with built-in safety rails for autonomous operation. Post tweets, search, read timelines, like, retweet, upload media, all through natural language. Includes daily budget limits, engagement deduplication, compact TOON-encoded responses, self-describing errors, and a workflow system where the MCP orchestrates multi-step growth strategies.
 
 Works with **Claude Code**, **Claude Desktop**, **OpenAI Codex**, **OpenClaw (ClawdBot)**, **Cursor**, **Windsurf**, **Cline**, and any other MCP-compatible client.
